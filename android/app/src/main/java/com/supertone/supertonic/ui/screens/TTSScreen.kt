@@ -326,8 +326,8 @@ private fun ParametersCard(
                 Slider(
                     value = speed,
                     onValueChange = onSpeedChange,
-                    valueRange = 1.0f..2.0f,
-                    steps = 19,
+                    valueRange = 1.0f..3.0f,
+                    steps = 39,
                     enabled = enabled
                 )
             }
