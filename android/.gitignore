@@ -1,0 +1,19 @@
+# Android-specific ignores
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# App build outputs
+/app/build
+/app/release
+
+# Assets (large files, copied separately)
+/app/src/main/assets/onnx/
+/app/src/main/assets/voice_styles/

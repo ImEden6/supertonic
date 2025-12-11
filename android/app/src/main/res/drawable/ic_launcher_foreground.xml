@@ -1,0 +1,15 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group android:scaleX="0.8"
+        android:scaleY="0.8"
+        android:translateX="10.8"
+        android:translateY="10.8">
+        <!-- Sound wave icon -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M54,27c-14.9,0 -27,12.1 -27,27s12.1,27 27,27s27,-12.1 27,-27S68.9,27 54,27zM42,63V45c0,-1.1 0.9,-2 2,-2s2,0.9 2,2v18c0,1.1 -0.9,2 -2,2S42,64.1 42,63zM50,69V39c0,-1.1 0.9,-2 2,-2s2,0.9 2,2v30c0,1.1 -0.9,2 -2,2S50,70.1 50,69zM58,66V42c0,-1.1 0.9,-2 2,-2s2,0.9 2,2v24c0,1.1 -0.9,2 -2,2S58,67.1 58,66zM66,60V48c0,-1.1 0.9,-2 2,-2s2,0.9 2,2v12c0,1.1 -0.9,2 -2,2S66,61.1 66,60z"/>
+    </group>
+</vector>
