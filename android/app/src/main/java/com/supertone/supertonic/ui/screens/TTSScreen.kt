@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -15,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.supertone.supertonic.tts.Style
@@ -288,6 +290,8 @@ private fun ParametersCard(
     onDenoisingStepsChange: (Int) -> Unit,
     enabled: Boolean
 ) {
+    var stepsText by remember(denoisingSteps) { mutableStateOf(denoisingSteps.toString()) }
+    
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -322,34 +326,60 @@ private fun ParametersCard(
                 Slider(
                     value = speed,
                     onValueChange = onSpeedChange,
-                    valueRange = 0.5f..2.0f,
-                    steps = 29,
+                    valueRange = 1.0f..2.0f,
+                    steps = 19,
                     enabled = enabled
                 )
             }
             
-            // Denoising Steps Slider
+            // Denoising Steps with editable text field
             Column {
+                Text("Denoising Steps", style = MaterialTheme.typography.bodyMedium)
+                
+                Spacer(modifier = Modifier.height(8.dp))
+                
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Denoising Steps", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        "$denoisingSteps",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium
+                    // Slider for quick adjustment (1-50)
+                    Slider(
+                        value = denoisingSteps.coerceIn(1, 50).toFloat(),
+                        onValueChange = { 
+                            val newValue = it.toInt()
+                            onDenoisingStepsChange(newValue)
+                            stepsText = newValue.toString()
+                        },
+                        valueRange = 1f..50f,
+                        steps = 48,
+                        enabled = enabled,
+                        modifier = Modifier.weight(1f)
+                    )
+                    
+                    // Editable text field for precise input (1-100)
+                    OutlinedTextField(
+                        value = stepsText,
+                        onValueChange = { newText ->
+                            stepsText = newText
+                            val parsed = newText.toIntOrNull()
+                            if (parsed != null && parsed in 1..100) {
+                                onDenoisingStepsChange(parsed)
+                            }
+                        },
+                        modifier = Modifier.width(80.dp),
+                        enabled = enabled,
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        shape = RoundedCornerShape(8.dp),
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(
+                            fontWeight = FontWeight.Medium
+                        )
                     )
                 }
-                Slider(
-                    value = denoisingSteps.toFloat(),
-                    onValueChange = { onDenoisingStepsChange(it.toInt()) },
-                    valueRange = 1f..20f,
-                    steps = 18,
-                    enabled = enabled
-                )
+                
                 Text(
-                    "Higher = better quality, slower",
+                    "Range: 1-100. Higher = better quality, slower. Recommended: 2-10",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
