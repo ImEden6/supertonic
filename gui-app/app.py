@@ -18,8 +18,11 @@ AVAILABLE_LANGS = [
     "ru", "sk", "sl", "sv", "tr", "uk", "vi", "na",
 ]
 VOICE_STYLES = ["F1", "F2", "F3", "F4", "F5"]
-DEFAULT_OUTPUT_DIR = Path(__file__).parent / "output"
-MODEL_DIR = Path(__file__).parent / "model"
+APP_DIR = Path(__file__).resolve().parent
+DEFAULT_OUTPUT_DIR = APP_DIR / "output"
+MODEL_DIR = APP_DIR / "model"
+MIN_STEPS, MAX_STEPS = 5, 12
+MIN_SPEED, MAX_SPEED = 0.7, 2.0
 
 
 def strip_markdown(text: str) -> str:
@@ -148,12 +151,12 @@ class App(tk.Tk):
             self.status_label.config(foreground="red")
             return
         input_path = Path(input_path)
-        if not input_path.exists():
-            self.status_var.set("Error: input file no longer exists.")
+        if not input_path.is_file():
+            self.status_var.set("Error: input file no longer exists (or is not a file).")
             self.status_label.config(foreground="red")
             return
 
-        output_dir = Path(self.output_dir_var.get().strip() or DEFAULT_OUTPUT_DIR)
+        output_dir = Path(self.output_dir_var.get().strip() or DEFAULT_OUTPUT_DIR).expanduser()
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -168,6 +171,14 @@ class App(tk.Tk):
             speed = float(self.speed_var.get())
         except ValueError:
             self.status_var.set("Error: quality and speed must be numbers.")
+            self.status_label.config(foreground="red")
+            return
+        if not (MIN_STEPS <= steps <= MAX_STEPS):
+            self.status_var.set(f"Error: quality must be between {MIN_STEPS} and {MAX_STEPS}.")
+            self.status_label.config(foreground="red")
+            return
+        if not (MIN_SPEED <= speed <= MAX_SPEED):
+            self.status_var.set(f"Error: speed must be between {MIN_SPEED} and {MAX_SPEED}.")
             self.status_label.config(foreground="red")
             return
 
@@ -185,6 +196,14 @@ class App(tk.Tk):
         )
         thread.start()
 
+    def _safe_after(self, func, *args):
+        """Schedule a callback on the main thread, swallowing errors from a
+        window that was closed while this worker was still running."""
+        try:
+            self.after(0, func, *args)
+        except (RuntimeError, tk.TclError):
+            pass
+
     def _worker(self, input_path: Path, lang: str, voice: str, steps: int, speed: float, output_dir: Path):
         try:
             text = read_input_file(input_path)
@@ -200,9 +219,11 @@ class App(tk.Tk):
             # package exposes no per-denoising-step callback, only a verbose stdout flag.
             max_len = 120 if lang in ("ko", "ja") else 300
             chunks = chunk_text(text, max_len)
+            if not chunks:
+                raise ValueError("No synthesizable text found after chunking.")
             total_chunks = len(chunks)
 
-            self.after(0, self._start_chunk_progress, total_chunks)
+            self._safe_after(self._start_chunk_progress, total_chunks)
 
             silence_duration = 0.3
             silence = np.zeros((1, int(silence_duration * tts.sample_rate)), dtype=np.float32)
@@ -223,14 +244,21 @@ class App(tk.Tk):
                 else:
                     wav_cat = np.concatenate([wav_cat, silence, wav], axis=1)
                     dur_total += dur_value + silence_duration
-                self.after(0, self._update_chunk_progress, i + 1, total_chunks)
+                self._safe_after(self._update_chunk_progress, i + 1, total_chunks)
 
-            out_path = output_dir / f"{input_path.stem}.wav"
+            # Include the voice in the filename so re-running the same input with a
+            # different voice doesn't overwrite the previous result; auto-increment
+            # on top of that in case the exact same input+voice is run again.
+            out_path = output_dir / f"{input_path.stem}_{voice}.wav"
+            counter = 2
+            while out_path.exists():
+                out_path = output_dir / f"{input_path.stem}_{voice} ({counter}).wav"
+                counter += 1
             tts.save_audio(wav_cat, str(out_path))
 
-            self.after(0, self._on_done, out_path, dur_total)
+            self._safe_after(self._on_done, out_path, dur_total)
         except Exception as e:
-            self.after(0, self._on_error, str(e))
+            self._safe_after(self._on_error, str(e))
 
     def _start_chunk_progress(self, total_chunks: int):
         self.progress.stop()
