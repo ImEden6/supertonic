@@ -4,9 +4,11 @@ Pick a .txt/.md/any text file, choose voice/language/quality/speed,
 and synthesize it to a WAV file in an output folder.
 """
 
+import queue
 import re
 import threading
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tkinter import filedialog, ttk
 
@@ -23,6 +25,13 @@ DEFAULT_OUTPUT_DIR = APP_DIR / "output"
 MODEL_DIR = APP_DIR / "model"
 MIN_STEPS, MAX_STEPS = 5, 12
 MIN_SPEED, MAX_SPEED = 0.7, 2.0
+
+# Chunk-level parallelism: a small pool of independent model sessions (each
+# with its own capped thread budget) rather than one session shared by
+# concurrent callers, so worker threads don't contend for one session's
+# internal thread pool. 4 sessions x 2 threads ~= 8 real compute threads.
+PARALLEL_CHUNK_WORKERS = 4
+PARALLEL_INTRA_OP_THREADS = 2
 
 
 def strip_markdown(text: str) -> str:
@@ -73,10 +82,14 @@ class App(tk.Tk):
         self.output_dir_var = tk.StringVar(value=str(DEFAULT_OUTPUT_DIR))
         self.status_var = tk.StringVar(value="Ready.")
 
-        # Loaded lazily on first synthesis and reused after that, so repeated
-        # runs (e.g. the same file with a different voice) skip reloading the
-        # ~400MB model's four ONNX sessions every time.
-        self._tts = None
+        # Pool of loaded model sessions, built lazily (capped at
+        # PARALLEL_CHUNK_WORKERS) and reused across runs, so repeated
+        # synthesis (e.g. the same file with a different voice) skips
+        # reloading the ~400MB model's ONNX sessions every time. A
+        # single-chunk run only ever needs (and builds) one session.
+        self._tts_pool: list = []
+        self._tts_pool_lock = threading.Lock()
+        self._tts_queue: "queue.Queue" = queue.Queue()
 
         self._build_widgets()
 
@@ -189,7 +202,7 @@ class App(tk.Tk):
 
         self.synthesize_btn.config(state="disabled")
         self.status_label.config(foreground="black")
-        if self._tts is None:
+        if not self._tts_pool:
             self.status_var.set("Loading model (first run may download ~400MB)...")
         else:
             self.status_var.set("Preparing...")
@@ -212,22 +225,77 @@ class App(tk.Tk):
         except (RuntimeError, tk.TclError):
             pass
 
+    def _acquire_tts(self):
+        """Check out a model session from the pool, building a new one
+        (up to PARALLEL_CHUNK_WORKERS) if none are idle."""
+        try:
+            return self._tts_queue.get_nowait()
+        except queue.Empty:
+            with self._tts_pool_lock:
+                if len(self._tts_pool) < PARALLEL_CHUNK_WORKERS:
+                    from supertonic import TTS
+
+                    tts = TTS(
+                        model_dir=MODEL_DIR,
+                        auto_download=True,
+                        intra_op_num_threads=PARALLEL_INTRA_OP_THREADS,
+                    )
+                    self._tts_pool.append(tts)
+                    return tts
+            # Pool is already at max size and every session is checked out —
+            # wait for one to be released.
+            return self._tts_queue.get()
+
+    def _release_tts(self, tts):
+        """Check a model session back into the pool for reuse."""
+        self._tts_queue.put(tts)
+
+    def _synthesize_chunks_parallel(self, chunks: list, voice: str, lang: str, steps: int, speed: float) -> list:
+        """Synthesize each chunk concurrently, each using its own pooled
+        session, and return (wav, duration, sample_rate) tuples in original
+        chunk order regardless of completion order."""
+        results: list = [None] * len(chunks)
+        completed = 0
+
+        def _do_chunk(chunk: str):
+            tts = self._acquire_tts()
+            try:
+                style = tts.get_voice_style(voice_name=voice)
+                wav, duration = tts.synthesize(
+                    text=chunk,
+                    voice_style=style,
+                    lang=lang,
+                    total_steps=steps,
+                    speed=speed,
+                )
+                dur_value = float(duration[0]) if hasattr(duration, "__len__") else float(duration)
+                return wav, dur_value, tts.sample_rate
+            finally:
+                self._release_tts(tts)
+
+        with ThreadPoolExecutor(max_workers=PARALLEL_CHUNK_WORKERS) as executor:
+            futures = {executor.submit(_do_chunk, chunk): i for i, chunk in enumerate(chunks)}
+            try:
+                for future in as_completed(futures):
+                    results[futures[future]] = future.result()
+                    completed += 1
+                    self._safe_after(self._update_chunk_progress, completed, len(chunks))
+            except Exception:
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+
+        return results
+
     def _worker(self, input_path: Path, lang: str, voice: str, steps: int, speed: float, output_dir: Path):
         try:
             text = read_input_file(input_path)
 
             from supertonic.utils import chunk_text
 
-            if self._tts is None:
-                from supertonic import TTS
-
-                self._tts = TTS(model_dir=MODEL_DIR, auto_download=True)
-            tts = self._tts
-            style = tts.get_voice_style(voice_name=voice)
-
             # Chunk ourselves (rather than handing the whole text to tts.synthesize()
-            # in one opaque call) so we can report real per-chunk progress — the
-            # package exposes no per-denoising-step callback, only a verbose stdout flag.
+            # in one opaque call) so we can report real per-chunk progress and
+            # synthesize multiple chunks concurrently — the package exposes no
+            # per-denoising-step callback, only a verbose stdout flag.
             max_len = 120 if lang in ("ko", "ja") else 300
             chunks = chunk_text(text, max_len)
             if not chunks:
@@ -237,25 +305,37 @@ class App(tk.Tk):
             self._safe_after(self._start_chunk_progress, total_chunks)
 
             silence_duration = 0.3
-            silence = np.zeros((1, int(silence_duration * tts.sample_rate)), dtype=np.float32)
             wav_cat = None
             dur_total = 0.0
-            for i, chunk in enumerate(chunks):
-                wav, duration = tts.synthesize(
-                    text=chunk,
-                    voice_style=style,
-                    lang=lang,
-                    total_steps=steps,
-                    speed=speed,
-                )
-                dur_value = float(duration[0]) if hasattr(duration, "__len__") else float(duration)
-                if wav_cat is None:
+
+            if total_chunks <= 1:
+                tts = self._acquire_tts()
+                try:
+                    style = tts.get_voice_style(voice_name=voice)
+                    wav, duration = tts.synthesize(
+                        text=chunks[0],
+                        voice_style=style,
+                        lang=lang,
+                        total_steps=steps,
+                        speed=speed,
+                    )
+                    dur_total = float(duration[0]) if hasattr(duration, "__len__") else float(duration)
                     wav_cat = wav
-                    dur_total = dur_value
-                else:
-                    wav_cat = np.concatenate([wav_cat, silence, wav], axis=1)
-                    dur_total += dur_value + silence_duration
-                self._safe_after(self._update_chunk_progress, i + 1, total_chunks)
+                finally:
+                    self._release_tts(tts)
+                self._safe_after(self._update_chunk_progress, 1, 1)
+            else:
+                results = self._synthesize_chunks_parallel(chunks, voice, lang, steps, speed)
+                silence = np.zeros(
+                    (1, int(silence_duration * results[0][2])), dtype=np.float32
+                )
+                for wav, dur_value, _sample_rate in results:
+                    if wav_cat is None:
+                        wav_cat = wav
+                        dur_total = dur_value
+                    else:
+                        wav_cat = np.concatenate([wav_cat, silence, wav], axis=1)
+                        dur_total += dur_value + silence_duration
 
             # Include the voice in the filename so re-running the same input with a
             # different voice doesn't overwrite the previous result; auto-increment
@@ -265,7 +345,12 @@ class App(tk.Tk):
             while out_path.exists():
                 out_path = output_dir / f"{input_path.stem}_{voice} ({counter}).wav"
                 counter += 1
-            tts.save_audio(wav_cat, str(out_path))
+
+            tts = self._acquire_tts()
+            try:
+                tts.save_audio(wav_cat, str(out_path))
+            finally:
+                self._release_tts(tts)
 
             self._safe_after(self._on_done, out_path, dur_total)
         except Exception as e:
@@ -274,11 +359,11 @@ class App(tk.Tk):
     def _start_chunk_progress(self, total_chunks: int):
         self.progress.stop()
         self.progress.config(mode="determinate", maximum=total_chunks, value=0)
-        self.status_var.set(f"Synthesizing chunk 0/{total_chunks}...")
+        self.status_var.set(f"Synthesizing... 0/{total_chunks} chunks complete")
 
     def _update_chunk_progress(self, done: int, total_chunks: int):
         self.progress.config(value=done)
-        self.status_var.set(f"Synthesizing chunk {done}/{total_chunks}...")
+        self.status_var.set(f"Synthesizing... {done}/{total_chunks} chunks complete")
 
     def _on_done(self, out_path: Path, duration: float):
         self.progress.stop()
