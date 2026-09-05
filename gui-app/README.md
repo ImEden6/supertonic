@@ -31,9 +31,18 @@ after that.
 1. Click **Browse...** next to "Input file" and pick a `.txt`, `.md`, or any
    plain-text file.
 2. Choose a language (`en`, `ko`, `na` for language-agnostic, etc. — 31
-   languages supported), a voice style (`F1`–`F5`), quality
+   languages supported), a voice style, quality
    (5 = fast/low quality, 12 = slow/high quality, default 12), and speed
    (0.7 = slow, 2.0 = fast, default 1.5).
+
+   | Voice | Character |
+   |---|---|
+   | `F1` | calm, steady |
+   | `F2` | bright, cheerful |
+   | `F3` | clear, announcer-style |
+   | `F4` | crisp, confident |
+   | `F5` | kind, gentle |
+
 3. Optionally change the output folder (defaults to `gui-app/output/`).
 4. Click **Synthesize**. The window stays responsive while it runs. When
    done, the WAV file is saved as `<input filename>.wav` in the output
