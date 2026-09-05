@@ -73,6 +73,11 @@ class App(tk.Tk):
         self.output_dir_var = tk.StringVar(value=str(DEFAULT_OUTPUT_DIR))
         self.status_var = tk.StringVar(value="Ready.")
 
+        # Loaded lazily on first synthesis and reused after that, so repeated
+        # runs (e.g. the same file with a different voice) skip reloading the
+        # ~400MB model's four ONNX sessions every time.
+        self._tts = None
+
         self._build_widgets()
 
     def _build_widgets(self):
@@ -184,7 +189,10 @@ class App(tk.Tk):
 
         self.synthesize_btn.config(state="disabled")
         self.status_label.config(foreground="black")
-        self.status_var.set("Loading model (first run may download ~400MB)...")
+        if self._tts is None:
+            self.status_var.set("Loading model (first run may download ~400MB)...")
+        else:
+            self.status_var.set("Preparing...")
         self.progress.grid()
         self.progress.config(mode="indeterminate")
         self.progress.start(10)
@@ -208,10 +216,13 @@ class App(tk.Tk):
         try:
             text = read_input_file(input_path)
 
-            from supertonic import TTS
             from supertonic.utils import chunk_text
 
-            tts = TTS(model_dir=MODEL_DIR, auto_download=True)
+            if self._tts is None:
+                from supertonic import TTS
+
+                self._tts = TTS(model_dir=MODEL_DIR, auto_download=True)
+            tts = self._tts
             style = tts.get_voice_style(voice_name=voice)
 
             # Chunk ourselves (rather than handing the whole text to tts.synthesize()
